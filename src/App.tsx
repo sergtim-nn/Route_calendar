@@ -1,13 +1,14 @@
 import { useState } from 'react';
 import { CalendarGrid } from './components/CalendarGrid';
-import { FileImport, FileImportDeliverySchedule, FileImportEasyMerch } from './components/FileImport';
-import { DeliveryScheduleEntry, ScheduleEntry } from './utils/schedule';
+import { FileImport, FileImportBackup, FileImportDeliverySchedule, FileImportEasyMerch, FileImportVisitHistory } from './components/FileImport';
+import { DeliveryScheduleEntry, ScheduleEntry, VisitHistoryEntry } from './utils/schedule';
 import { parseDeliveryScheduleRow, parseEasyMerchRow, parseScheduleRow } from './utils/parser';
 import { Calendar, RefreshCw, ArrowRight } from 'lucide-react';
 
 function App() {
   const [entries, setEntries] = useState<ScheduleEntry[]>([]);
   const [deliveryScheduleEntries, setDeliveryScheduleEntries] = useState<DeliveryScheduleEntry[]>([]);
+  const [visitHistoryEntries, setVisitHistoryEntries] = useState<VisitHistoryEntry[]>([]);
   const [showCalendar, setShowCalendar] = useState(false);
 
   const handleDataLoaded = (data: any[]) => {
@@ -38,14 +39,41 @@ function App() {
     setDeliveryScheduleEntries((prev) => [...prev, ...normalizedData]);
   };
 
+  const handleVisitHistoryLoaded = (data: VisitHistoryEntry[]) => {
+    if (data.length === 0) {
+      console.warn('Visit history file loaded but produced 0 normalized entries');
+    } else {
+      console.log('Visit history loaded sample:', data.slice(0, 5));
+    }
+
+    setVisitHistoryEntries((prev) => [...prev, ...data]);
+  };
+
+  const handleBackupRestore = (payload: {
+    entries?: ScheduleEntry[];
+    deliveryScheduleEntries?: DeliveryScheduleEntry[];
+    visitHistoryEntries?: VisitHistoryEntry[];
+  }) => {
+    if (payload.entries?.length) {
+      setEntries((prev) => [...prev, ...payload.entries!]);
+    }
+    if (payload.deliveryScheduleEntries?.length) {
+      setDeliveryScheduleEntries((prev) => [...prev, ...payload.deliveryScheduleEntries!]);
+    }
+    if (payload.visitHistoryEntries?.length) {
+      setVisitHistoryEntries((prev) => [...prev, ...payload.visitHistoryEntries!]);
+    }
+  };
+
   const handleReset = () => {
     setEntries([]);
     setDeliveryScheduleEntries([]);
+    setVisitHistoryEntries([]);
     setShowCalendar(false);
   };
 
   const handleGoToCalendar = () => {
-    if (entries.length > 0 || deliveryScheduleEntries.length > 0) {
+    if (entries.length > 0 || deliveryScheduleEntries.length > 0 || visitHistoryEntries.length > 0) {
       setShowCalendar(true);
       window.scrollTo({ top: 0, behavior: 'smooth' });
     }
@@ -64,7 +92,7 @@ function App() {
             <h1 className="text-xl font-bold text-gray-900">Календарь маршрутов</h1>
           </div>
 
-          {(entries.length > 0 || deliveryScheduleEntries.length > 0) && (
+          {(entries.length > 0 || deliveryScheduleEntries.length > 0 || visitHistoryEntries.length > 0) && (
             <button
               onClick={handleReset}
               className="flex items-center space-x-2 text-sm text-gray-500 hover:text-red-600 transition-colors"
@@ -79,15 +107,22 @@ function App() {
       <main className="w-full px-4 sm:px-6 lg:px-8 py-4 h-[calc(100vh-64px)] overflow-hidden">
         {shouldShowUploadScreen ? (
           <div className="h-full flex flex-col items-center justify-center">
-            <div className="max-w-[1600px] w-full space-y-6">
-              <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+            <div className="max-w-[1800px] w-full space-y-6">
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-5 gap-4">
                 <FileImport onDataLoaded={handleDataLoaded} />
                 <FileImportEasyMerch onEasyMerchLoaded={handleEasyMerchLoaded} />
                 <FileImportDeliverySchedule onDeliveryScheduleLoaded={handleDeliveryScheduleLoaded} />
+                <FileImportVisitHistory onVisitHistoryLoaded={handleVisitHistoryLoaded} />
+                <FileImportBackup
+                  entries={entries}
+                  deliveryScheduleEntries={deliveryScheduleEntries}
+                  visitHistoryEntries={visitHistoryEntries}
+                  onBackupRestore={handleBackupRestore}
+                />
               </div>
 
               <div className="flex flex-col items-center gap-3">
-                {(entries.length > 0 || deliveryScheduleEntries.length > 0) && (
+                {(entries.length > 0 || deliveryScheduleEntries.length > 0 || visitHistoryEntries.length > 0) && (
                   <div className="text-sm text-gray-600 bg-white border border-gray-200 rounded-lg px-4 py-2 shadow-sm text-center">
                     <div>
                       Загружено маршрутных записей: <span className="font-semibold text-gray-900">{entries.length}</span>
@@ -95,12 +130,15 @@ function App() {
                     <div>
                       Загружено зон графика доставки: <span className="font-semibold text-gray-900">{deliveryScheduleEntries.length}</span>
                     </div>
+                    <div>
+                      Загружено визитов истории: <span className="font-semibold text-gray-900">{visitHistoryEntries.length}</span>
+                    </div>
                   </div>
                 )}
 
                 <button
                   onClick={handleGoToCalendar}
-                  disabled={entries.length === 0 && deliveryScheduleEntries.length === 0}
+                  disabled={entries.length === 0 && deliveryScheduleEntries.length === 0 && visitHistoryEntries.length === 0}
                   className="flex items-center space-x-2 px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors font-medium"
                 >
                   <span>Перейти в календарь</span>
@@ -111,19 +149,23 @@ function App() {
               <div className="mt-8 bg-blue-50 p-4 rounded-lg border border-blue-100 text-sm text-blue-800">
                 <p className="font-semibold mb-2">Как это работает:</p>
                 <ul className="list-disc list-inside space-y-1">
-                  <li>Можно загрузить «Загрузка маршрутов», «EasyMerch» и «График доставки» в любом порядке, не переходя в календарь.</li>
-                  <li>Все три карточки загрузки расположены рядом по горизонтали на широком экране.</li>
-                  <li>Данные из разных файлов сохраняются в рамках одной сессии.</li>
+                  <li>Можно загрузить «Загрузка маршрутов», «EasyMerch», «График доставки» и «История визитов» в любом порядке, не переходя в календарь.</li>
+                  <li>Блок «Бэкап» позволяет сохранить все данные или только выбранные разделы и затем восстановить их обратно.</li>
+                  <li>После восстановления можно продолжить загружать дополнительные файлы — данные объединяются в рамках сессии.</li>
                   <li>Переход в календарь выполняется только по кнопке «Перейти в календарь».</li>
                 </ul>
               </div>
             </div>
           </div>
-        ) : (
-          <div className="h-full min-h-0 flex flex-col overflow-hidden">
-            <CalendarGrid entries={entries} deliveryScheduleEntries={deliveryScheduleEntries} />
-          </div>
-        )}
+          ) : (
+           <div className="h-full min-h-0 flex flex-col overflow-hidden">
+             <CalendarGrid
+               entries={entries}
+               deliveryScheduleEntries={deliveryScheduleEntries}
+               visitHistoryEntries={visitHistoryEntries}
+             />
+           </div>
+         )}
       </main>
     </div>
   );

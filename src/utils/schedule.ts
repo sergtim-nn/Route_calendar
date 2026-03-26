@@ -32,6 +32,16 @@ export type DeliveryScheduleEntry = {
   Sunday: boolean;
 };
 
+export type VisitHistoryEntry = {
+  Date: string;
+  RouteCode: string;
+  ClientId: string;
+  Name: string;
+  Address: string;
+  CoordinateDeviationMeters?: number;
+  OrderAmountRub?: number;
+};
+
 // Colors for different routes to distinguish them visually
 const ROUTE_COLORS = [
   'bg-red-100 text-red-600 border-red-200',

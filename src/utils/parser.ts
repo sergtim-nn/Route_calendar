@@ -1,4 +1,4 @@
-import { DeliveryScheduleEntry, ScheduleEntry } from './schedule';
+import { DeliveryScheduleEntry, ScheduleEntry, VisitHistoryEntry } from './schedule';
 import { parse, isValid } from 'date-fns';
 
 export const parseScheduleRow = (row: any): ScheduleEntry | null => {
@@ -194,5 +194,68 @@ export const parseDeliveryScheduleRow = (row: any): DeliveryScheduleEntry | null
     Friday: yesNo(getVal(['Пятница', 'Friday'])),
     Saturday: yesNo(getVal(['Суббота', 'Saturday'])),
     Sunday: yesNo(getVal(['Воскресенье', 'Sunday'])),
+  };
+};
+
+export const parseVisitHistoryRow = (row: any): VisitHistoryEntry | null => {
+  const normalizeKey = (value: string) => value
+    .replace(/\uFEFF/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+
+  const getVal = (keys: string[]) => {
+    const rowKeys = Object.keys(row);
+
+    for (const key of keys) {
+      if (row[key] !== undefined) return row[key];
+
+      const normalizedTarget = normalizeKey(key);
+      const foundKey = rowKeys.find((k) => normalizeKey(k) === normalizedTarget);
+      if (foundKey) return row[foundKey];
+    }
+    return undefined;
+  };
+
+  const parseLocalizedNumber = (value: unknown): number | undefined => {
+    const text = String(value ?? '').replace(/\u00A0/g, ' ').trim();
+    if (!text) return undefined;
+    const normalized = text.replace(/\s+/g, '').replace(',', '.');
+    const parsed = Number(normalized);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  };
+
+  const date = String(getVal(['Дата', 'Date']) || '').trim();
+  const routeCode = String(getVal(['Маршрут', 'Route', 'RouteCode']) || '').trim();
+  const clientId = String(getVal(['ИД клиента', 'ClientId', 'ID клиента']) || '').trim();
+  const name = String(getVal(['Название', 'Name']) || '').trim();
+  const address = String(getVal(['Адрес', 'Address']) || '').trim();
+  const coordinateDeviationMeters = parseLocalizedNumber(
+    getVal([
+      'Отклонение координат ТТ и визита м',
+      'Отклонение координат ТТ и визита, м',
+      'Отклонение координат тт и визита м',
+      'CoordinateDeviationMeters',
+    ]),
+  );
+  const orderAmountRub = parseLocalizedNumber(
+    getVal([
+      'Сумма заказа руб',
+      'Сумма заказа, руб',
+      'Сумма заказа',
+      'OrderAmountRub',
+    ]),
+  );
+
+  if (!date || !clientId) return null;
+
+  return {
+    Date: date,
+    RouteCode: routeCode,
+    ClientId: clientId,
+    Name: name,
+    Address: address,
+    CoordinateDeviationMeters: coordinateDeviationMeters,
+    OrderAmountRub: orderAmountRub,
   };
 };

@@ -1,6 +1,7 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import * as XLSX from 'xlsx';
-import { Upload, FileSpreadsheet, Loader2, Download } from 'lucide-react';
+import { Upload, FileSpreadsheet, Loader2, Download, ArchiveRestore, Save } from 'lucide-react';
+import type { DeliveryScheduleEntry, ScheduleEntry, VisitHistoryEntry } from '../utils/schedule';
 
 interface FileImportProps {
   onDataLoaded: (data: any[]) => void;
@@ -12,6 +13,25 @@ interface FileImportEasyMerchProps {
 
 interface FileImportDeliveryScheduleProps {
   onDeliveryScheduleLoaded: (data: any[]) => void;
+}
+
+interface FileImportVisitHistoryProps {
+  onVisitHistoryLoaded: (data: VisitHistoryEntry[]) => void;
+}
+
+interface BackupPayload {
+  version: 1;
+  exportedAt: string;
+  entries?: ScheduleEntry[];
+  deliveryScheduleEntries?: DeliveryScheduleEntry[];
+  visitHistoryEntries?: VisitHistoryEntry[];
+}
+
+interface FileImportBackupProps {
+  entries: ScheduleEntry[];
+  deliveryScheduleEntries: DeliveryScheduleEntry[];
+  visitHistoryEntries: VisitHistoryEntry[];
+  onBackupRestore: (payload: BackupPayload) => void;
 }
 
 const normalizeEasyMerchHeader = (value: unknown): string => {
@@ -26,6 +46,45 @@ const normalizeEasyMerchHeader = (value: unknown): string => {
   }
 
   return text;
+};
+
+const parseLocalizedVisitHistoryNumber = (value: unknown): number | undefined => {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+
+  const text = String(value ?? '')
+    .replace(/\u00A0/g, ' ')
+    .replace(/\u202F/g, ' ')
+    .trim();
+
+  if (!text) return undefined;
+
+  const normalized = text.replace(/\s+/g, '').replace(',', '.');
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) ? parsed : undefined;
+};
+
+const formatVisitHistoryDateValue = (value: unknown): string => {
+  if (value === undefined || value === null || value === '') return '';
+
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    const day = String(value.getDate()).padStart(2, '0');
+    const month = String(value.getMonth() + 1).padStart(2, '0');
+    const year = value.getFullYear();
+    return `${day}.${month}.${year}`;
+  }
+
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    const parsed = XLSX.SSF.parse_date_code(value);
+    if (parsed) {
+      const day = String(parsed.d).padStart(2, '0');
+      const month = String(parsed.m).padStart(2, '0');
+      const year = parsed.y;
+      return `${day}.${month}.${year}`;
+    }
+  }
+
+  return normalizeEasyMerchHeader(value);
 };
 
 const routeTemplateHeaders = [
@@ -98,6 +157,26 @@ const deliveryScheduleTemplateRows = [
   ['H09', '20', '', 'N', 'N', 'Y', 'N', 'N', 'N', 'N'],
   ['H10', '20', '', 'N', 'N', 'N', 'Y', 'N', 'N', 'N'],
   ['H11', '20', '', 'N', 'N', 'N', 'Y', 'N', 'N', 'N'],
+];
+
+const visitHistoryTemplateHeaders = [
+  'Дата',
+  'Маршрут',
+  'ИД клиента',
+  'Название',
+  'Адрес',
+  'Отклонение координат ТТ и визита м',
+  'Сумма заказа руб',
+];
+
+const visitHistoryTemplateRows = [
+  ['02.03.2026', '560_42CON', '10044444', 'КСК-Воронеж ООО', '394065, Воронежская обл, Воронеж г, Патриотов пр-кт, 11, Б', '16 237,72', ''],
+  ['02.03.2026', '560_42CON', '9610713', 'Эталон Торг ООО', '394065, Воронежская обл, Воронеж г, Патриотов пр-кт, д.23 В', '299,31', ''],
+  ['02.03.2026', '560_42CON', '9610585', 'Авалон ООО', '394065, Воронежская обл, Воронеж г, Патриотов пр-кт, д. 28 А', '1 410,24', ''],
+  ['02.03.2026', '560_42CON', '10044347', 'КСК-Воронеж ООО', '394065, Воронежская обл, Воронеж г, Патриотов пр-кт, 116, А', '848,17', ''],
+  ['02.03.2026', '560_42CON', '9611520', 'Визит ООО', '394048, Воронежская обл, Воронеж г, Междуреченская ул, д.1Б', '86,43', '5 170,18'],
+  ['02.03.2026', '560_42CON', '9611519', 'Мнацаканян Нели Торгомовна ИП', '394048, Шилово рп, Междуреченская ул, д.10', '9 332,33', ''],
+  ['02.03.2026', '560_42CON', '10044317', 'КСК-Воронеж ООО', '394048, Воронежская обл, Воронеж г, Междуреченская ул, 4', '1 360 184,80', ''],
 ];
 
 const downloadTemplateWorkbook = (fileName: string, headers: string[], rows: Array<Array<string | number>>) => {
@@ -440,6 +519,303 @@ export function FileImportDeliverySchedule({ onDeliveryScheduleLoaded }: FileImp
         <p className="font-semibold mb-1">Ожидаемый формат:</p>
         <code className="bg-gray-100 p-1 rounded block overflow-x-auto text-xs">
           Номер зоны | Частота (по неделям) | Дата запроса | Понедельник | Вторник | Среда | Четверг | Пятница | Суббота | Воскресенье
+        </code>
+      </div>
+    </div>
+  );
+}
+
+export function FileImportVisitHistory({ onVisitHistoryLoaded }: FileImportVisitHistoryProps) {
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState(false);
+  const [loadedRowsCount, setLoadedRowsCount] = useState(0);
+
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setLoading(true);
+    setError(null);
+    setSuccess(false);
+    setLoadedRowsCount(0);
+
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      try {
+        const bstr = evt.target?.result;
+        const workbook = XLSX.read(bstr, { type: 'binary', cellDates: true });
+        const wsname = workbook.SheetNames[0];
+        const ws = workbook.Sheets[wsname];
+
+        const rows = XLSX.utils.sheet_to_json<(string | number | Date | null)[]>(ws, {
+          header: 1,
+          raw: true,
+          defval: '',
+          blankrows: false,
+          dateNF: 'dd.mm.yyyy',
+        });
+
+        if (!rows.length) {
+          throw new Error('Visit history sheet is empty');
+        }
+
+        const parsedRows: Array<VisitHistoryEntry | null> = rows
+          .slice(1)
+          .filter((row) => row.some((cell) => String(cell ?? '').trim() !== ''))
+          .map((row) => {
+            const date = formatVisitHistoryDateValue(row[0]);
+            const routeCode = String(row[1] ?? '').trim();
+            const clientId = String(row[2] ?? '').trim();
+            const name = String(row[3] ?? '').trim();
+            const address = String(row[4] ?? '').trim();
+            const coordinateDeviationMeters = parseLocalizedVisitHistoryNumber(row[5]);
+            const orderAmountRub = parseLocalizedVisitHistoryNumber(row[6]);
+
+            if (!date || !clientId) return null;
+
+            return {
+              Date: date,
+              RouteCode: routeCode,
+              ClientId: clientId,
+              Name: name,
+              Address: address,
+              CoordinateDeviationMeters: coordinateDeviationMeters,
+              OrderAmountRub: orderAmountRub,
+            };
+          });
+
+        const data = parsedRows.filter((entry): entry is VisitHistoryEntry => entry !== null);
+
+        onVisitHistoryLoaded(data);
+        setLoadedRowsCount(data.length);
+        setSuccess(true);
+        setTimeout(() => setSuccess(false), 3000);
+      } catch (err) {
+        console.error('Error parsing visit history Excel:', err);
+        setError('Не удалось прочитать файл. Убедитесь, что это корректный Excel файл истории визитов.');
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    reader.readAsBinaryString(file);
+  };
+
+  return (
+    <div className="p-6 bg-white rounded-lg shadow-sm border border-gray-200 text-center">
+      <div className="mb-4 flex justify-center text-violet-500">
+        <FileSpreadsheet size={48} />
+      </div>
+      <h3 className="text-lg font-medium text-gray-900 mb-2">История визитов</h3>
+      <p className="text-sm text-gray-500 mb-6">
+        Загрузите Excel файл с историей фактических визитов
+      </p>
+
+      <div className="flex flex-col items-center gap-3">
+        <div className="relative inline-block">
+          <input
+            type="file"
+            accept=".xlsx, .xls"
+            onChange={handleFileUpload}
+            className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+            disabled={loading}
+          />
+          <button
+            className="flex items-center space-x-2 px-4 py-2 bg-violet-600 text-white rounded-md hover:bg-violet-700 transition-colors disabled:opacity-50"
+            disabled={loading}
+          >
+            {loading ? <Loader2 className="animate-spin" size={20} /> : <Upload size={20} />}
+            <span>{loading ? 'Обработка...' : 'Выберите файл'}</span>
+          </button>
+        </div>
+
+        <button
+          type="button"
+          onClick={() => downloadTemplateWorkbook('template-visit-history.xlsx', visitHistoryTemplateHeaders, visitHistoryTemplateRows)}
+          className="inline-flex items-center space-x-2 px-4 py-2 text-sm font-medium text-violet-700 bg-violet-50 border border-violet-200 rounded-md hover:bg-violet-100 transition-colors"
+        >
+          <Download size={16} />
+          <span>Скачать шаблон с примером</span>
+        </button>
+      </div>
+
+      {success && (
+        <div className="mt-4 text-sm text-green-600 bg-green-50 p-2 rounded space-y-1">
+          <div>✓ Файл успешно загружен</div>
+          <div>
+            Загружено визитов: <span className="font-semibold">{loadedRowsCount}</span>
+          </div>
+        </div>
+      )}
+
+      {error && (
+        <div className="mt-4 text-sm text-red-600 bg-red-50 p-2 rounded">
+          {error}
+        </div>
+      )}
+
+      <div className="mt-6 text-left text-xs text-gray-400">
+        <p className="font-semibold mb-1">Ожидаемый формат:</p>
+        <code className="bg-gray-100 p-1 rounded block overflow-x-auto text-xs">
+          Дата | Маршрут | ИД клиента | Название | Адрес | Отклонение координат ТТ и визита м | Сумма заказа руб
+        </code>
+      </div>
+    </div>
+  );
+}
+
+export function FileImportBackup({
+  entries,
+  deliveryScheduleEntries,
+  visitHistoryEntries,
+  onBackupRestore,
+}: FileImportBackupProps) {
+  const [includeRoutes, setIncludeRoutes] = useState(true);
+  const [includeDelivery, setIncludeDelivery] = useState(true);
+  const [includeVisits, setIncludeVisits] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
+
+  const backupPreview = useMemo(() => ({
+    entries: includeRoutes ? entries.length : 0,
+    delivery: includeDelivery ? deliveryScheduleEntries.length : 0,
+    visits: includeVisits ? visitHistoryEntries.length : 0,
+  }), [includeRoutes, includeDelivery, includeVisits, entries.length, deliveryScheduleEntries.length, visitHistoryEntries.length]);
+
+  const hasAnythingSelected = includeRoutes || includeDelivery || includeVisits;
+  const hasAnythingToBackup = backupPreview.entries > 0 || backupPreview.delivery > 0 || backupPreview.visits > 0;
+
+  const handleDownloadBackup = () => {
+    setError(null);
+    setSuccess(null);
+
+    if (!hasAnythingSelected) {
+      setError('Выберите хотя бы один тип данных для бэкапа.');
+      return;
+    }
+
+    if (!hasAnythingToBackup) {
+      setError('Нет данных для бэкапа по выбранным типам.');
+      return;
+    }
+
+    const payload: BackupPayload = {
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      ...(includeRoutes ? { entries } : {}),
+      ...(includeDelivery ? { deliveryScheduleEntries } : {}),
+      ...(includeVisits ? { visitHistoryEntries } : {}),
+    };
+
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    const timestamp = new Date().toISOString().slice(0, 19).replace(/[T:]/g, '-');
+    link.href = url;
+    link.download = `calendar-routes-backup-${timestamp}.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+
+    setSuccess('Бэкап успешно сохранен');
+    setTimeout(() => setSuccess(null), 3000);
+  };
+
+  const handleRestoreBackup = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setError(null);
+    setSuccess(null);
+
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      try {
+        const text = String(evt.target?.result ?? '');
+        const parsed = JSON.parse(text) as BackupPayload;
+
+        if (!parsed || typeof parsed !== 'object' || parsed.version !== 1) {
+          throw new Error('Unsupported backup format');
+        }
+
+        onBackupRestore(parsed);
+        setSuccess('Бэкап успешно восстановлен');
+        setTimeout(() => setSuccess(null), 3000);
+      } catch (err) {
+        console.error('Error restoring backup:', err);
+        setError('Не удалось восстановить бэкап. Убедитесь, что это корректный JSON-файл бэкапа.');
+      }
+    };
+
+    reader.readAsText(file, 'utf-8');
+    e.target.value = '';
+  };
+
+  return (
+    <div className="p-6 bg-white rounded-lg shadow-sm border border-gray-200 text-center">
+      <div className="mb-4 flex justify-center text-slate-600">
+        <ArchiveRestore size={48} />
+      </div>
+      <h3 className="text-lg font-medium text-gray-900 mb-2">Бэкап</h3>
+      <p className="text-sm text-gray-500 mb-4">
+        Сохранение и восстановление текущих загруженных данных
+      </p>
+
+      <div className="space-y-2 text-left text-sm bg-gray-50 border border-gray-200 rounded-lg p-3 mb-4">
+        <label className="flex items-center gap-2">
+          <input type="checkbox" checked={includeRoutes} onChange={(e) => setIncludeRoutes(e.target.checked)} />
+          <span>Маршруты ({entries.length})</span>
+        </label>
+        <label className="flex items-center gap-2">
+          <input type="checkbox" checked={includeDelivery} onChange={(e) => setIncludeDelivery(e.target.checked)} />
+          <span>График доставки ({deliveryScheduleEntries.length})</span>
+        </label>
+        <label className="flex items-center gap-2">
+          <input type="checkbox" checked={includeVisits} onChange={(e) => setIncludeVisits(e.target.checked)} />
+          <span>История визитов ({visitHistoryEntries.length})</span>
+        </label>
+      </div>
+
+      <div className="flex flex-col items-center gap-3">
+        <button
+          type="button"
+          onClick={handleDownloadBackup}
+          className="inline-flex items-center space-x-2 px-4 py-2 text-sm font-medium text-slate-700 bg-slate-100 border border-slate-300 rounded-md hover:bg-slate-200 transition-colors"
+        >
+          <Save size={16} />
+          <span>Скачать бэкап</span>
+        </button>
+
+        <div className="relative inline-block">
+          <input
+            type="file"
+            accept=".json"
+            onChange={handleRestoreBackup}
+            className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+          />
+          <button className="inline-flex items-center space-x-2 px-4 py-2 text-sm font-medium text-slate-700 bg-white border border-slate-300 rounded-md hover:bg-slate-50 transition-colors">
+            <ArchiveRestore size={16} />
+            <span>Восстановить бэкап</span>
+          </button>
+        </div>
+      </div>
+
+      {success && (
+        <div className="mt-4 text-sm text-green-600 bg-green-50 p-2 rounded">
+          {success}
+        </div>
+      )}
+
+      {error && (
+        <div className="mt-4 text-sm text-red-600 bg-red-50 p-2 rounded">
+          {error}
+        </div>
+      )}
+
+      <div className="mt-6 text-left text-xs text-gray-400">
+        <p className="font-semibold mb-1">Что входит в бэкап:</p>
+        <code className="bg-gray-100 p-1 rounded block overflow-x-auto text-xs">
+          Маршруты | График доставки | История визитов
         </code>
       </div>
     </div>

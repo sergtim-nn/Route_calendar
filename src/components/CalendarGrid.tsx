@@ -10,15 +10,17 @@ import {
   getDay,
   getDate,
   differenceInCalendarDays,
+  parse,
 } from 'date-fns';
 import { ru } from 'date-fns/locale';
-import { ChevronLeft, ChevronRight, User, Headphones, Filter, X, Check, Download, RotateCcw } from 'lucide-react';
+import { ChevronLeft, ChevronRight, User, Headphones, Filter, X, Check, Download, RotateCcw, Accessibility } from 'lucide-react';
 import * as XLSX from 'xlsx';
-import { DeliveryScheduleEntry, ScheduleEntry, isScheduled, isDeliveryScheduled, getRouteColor, cn } from '../utils/schedule';
+import { DeliveryScheduleEntry, ScheduleEntry, VisitHistoryEntry, isScheduled, isDeliveryScheduled, getRouteColor, cn } from '../utils/schedule';
 
 interface CalendarGridProps {
   entries: ScheduleEntry[];
   deliveryScheduleEntries: DeliveryScheduleEntry[];
+  visitHistoryEntries: VisitHistoryEntry[];
 }
 
 type PointMeta = {
@@ -39,9 +41,16 @@ type RouteOption = {
 };
 
 type ProximityFilterKey = 'same-day' | 'pm1' | 'pm2';
+type FactOrderProximityKey = 'fo-same-day' | 'fo-pm1' | 'fo-pm2';
 
 type ProximityOption = {
   key: ProximityFilterKey;
+  label: string;
+  description: string;
+};
+
+type FactOrderProximityOption = {
+  key: FactOrderProximityKey;
   label: string;
   description: string;
 };
@@ -68,7 +77,25 @@ const PROXIMITY_OPTIONS: ProximityOption[] = [
   },
 ];
 
-export function CalendarGrid({ entries, deliveryScheduleEntries }: CalendarGridProps) {
+const FACT_ORDER_PROXIMITY_OPTIONS: FactOrderProximityOption[] = [
+  {
+    key: 'fo-same-day',
+    label: 'день в день',
+    description: 'Фактический заказ ТП совпадает с плановым визитом оператора в тот же день',
+  },
+  {
+    key: 'fo-pm1',
+    label: '+/-1 день',
+    description: 'Фактический заказ ТП отстоит от планового визита оператора на 1 день',
+  },
+  {
+    key: 'fo-pm2',
+    label: '+/-2 дня',
+    description: 'Фактический заказ ТП отстоит от планового визита оператора на 2 дня',
+  },
+];
+
+export function CalendarGrid({ entries, deliveryScheduleEntries, visitHistoryEntries }: CalendarGridProps) {
   const [currentDate, setCurrentDate] = useState(new Date());
   const [filterText, setFilterText] = useState('');
   const [isRouteFilterOpen, setIsRouteFilterOpen] = useState(false);
@@ -76,6 +103,8 @@ export function CalendarGrid({ entries, deliveryScheduleEntries }: CalendarGridP
   const [selectedRouteKeys, setSelectedRouteKeys] = useState<string[]>([]);
   const [isProximityFilterOpen, setIsProximityFilterOpen] = useState(false);
   const [selectedProximityKeys, setSelectedProximityKeys] = useState<ProximityFilterKey[]>([]);
+  const [isFactOrderFilterOpen, setIsFactOrderFilterOpen] = useState(false);
+  const [selectedFactOrderKeys, setSelectedFactOrderKeys] = useState<FactOrderProximityKey[]>([]);
   const [isJointCoverageOnly, setIsJointCoverageOnly] = useState(false);
 
   const monthStart = startOfMonth(currentDate);
@@ -171,6 +200,40 @@ export function CalendarGrid({ entries, deliveryScheduleEntries }: CalendarGridP
 
     return map;
   }, [deliveryScheduleEntries]);
+
+  const visitHistoryMap = useMemo(() => {
+    const map = new Map<string, VisitHistoryEntry[]>();
+
+    visitHistoryEntries.forEach((entry) => {
+      const normalizedClientId = String(entry.ClientId ?? '').trim();
+      const normalizedDate = String(entry.Date ?? '').trim();
+      const key = `${normalizedClientId}::${normalizedDate}`;
+      const existing = map.get(key);
+      if (existing) {
+        existing.push(entry);
+      } else {
+        map.set(key, [entry]);
+      }
+    });
+
+    return map;
+  }, [visitHistoryEntries]);
+
+  const formatDayKey = (day: Date) => format(day, 'dd.MM.yyyy');
+
+  const formatOrderAmount = (amount: number) => new Intl.NumberFormat('ru-RU', {
+    maximumFractionDigits: 0,
+  }).format(amount);
+
+  const formatDistanceKm = (meters: number) => {
+    const km = meters / 1000;
+    return `${km >= 10 ? km.toFixed(0) : km.toFixed(1)} км`;
+  };
+
+  const formatDistanceBadgeKm = (meters: number) => {
+    const km = meters / 1000;
+    return `${km >= 10 ? km.toFixed(0) : km.toFixed(1)}`;
+  };
 
   const isPointDeliveryScheduled = (point: PointMeta, day: Date) => {
     const zone = point.DeliveryZone?.trim();
@@ -314,8 +377,45 @@ export function CalendarGrid({ entries, deliveryScheduleEntries }: CalendarGridP
     return map;
   }, [daysInMonth, pointEntriesMap, pointMetaMap]);
 
+  const pointFactOrderProximityMap = useMemo(() => {
+    const map = new Map<string, Set<FactOrderProximityKey>>();
+
+    pointMetaMap.forEach((point, clientId) => {
+      if (!point.hasOperator) {
+        map.set(clientId, new Set());
+        return;
+      }
+
+      const pointEntries = pointEntriesMap.get(clientId) ?? [];
+      const operatorDates = daysInMonth.filter((day) =>
+        pointEntries.some((entry) => entry.Type === 'Оператор' && isScheduled(day, entry)),
+      );
+
+      const factOrderDates = visitHistoryEntries
+        .filter((entry) => String(entry.ClientId).trim() === clientId && (entry.OrderAmountRub ?? 0) > 0)
+        .map((entry) => parse(String(entry.Date).trim(), 'dd.MM.yyyy', new Date()))
+        .filter((date) => !Number.isNaN(date.getTime()));
+
+      const matches = new Set<FactOrderProximityKey>();
+
+      factOrderDates.forEach((factDate) => {
+        operatorDates.forEach((operatorDay) => {
+          const diff = Math.abs(differenceInCalendarDays(operatorDay, factDate));
+          if (diff === 0) matches.add('fo-same-day');
+          if (diff === 1) matches.add('fo-pm1');
+          if (diff === 2) matches.add('fo-pm2');
+        });
+      });
+
+      map.set(clientId, matches);
+    });
+
+    return map;
+  }, [daysInMonth, pointEntriesMap, pointMetaMap, visitHistoryEntries]);
+
   const selectedRouteSet = useMemo(() => new Set(selectedRouteKeys), [selectedRouteKeys]);
   const selectedProximitySet = useMemo(() => new Set(selectedProximityKeys), [selectedProximityKeys]);
+  const selectedFactOrderSet = useMemo(() => new Set(selectedFactOrderKeys), [selectedFactOrderKeys]);
 
   const selectedRouteLabels = useMemo(
     () => routeOptions.filter((option) => selectedRouteSet.has(option.key)).map((option) => option.label),
@@ -327,7 +427,12 @@ export function CalendarGrid({ entries, deliveryScheduleEntries }: CalendarGridP
     [selectedProximitySet],
   );
 
-  const hasSelectionFilters = selectedRouteLabels.length > 0 || selectedProximityLabels.length > 0 || isJointCoverageOnly;
+  const selectedFactOrderLabels = useMemo(
+    () => FACT_ORDER_PROXIMITY_OPTIONS.filter((option) => selectedFactOrderSet.has(option.key)).map((option) => option.label),
+    [selectedFactOrderSet],
+  );
+
+  const hasSelectionFilters = selectedRouteLabels.length > 0 || selectedProximityLabels.length > 0 || selectedFactOrderLabels.length > 0 || isJointCoverageOnly;
 
   const filteredPoints = useMemo(() => {
     const proximityFiltered = selectedProximitySet.size === 0
@@ -343,12 +448,25 @@ export function CalendarGrid({ entries, deliveryScheduleEntries }: CalendarGridP
           return false;
         });
 
+    const factOrderFiltered = selectedFactOrderSet.size === 0
+      ? proximityFiltered
+      : proximityFiltered.filter((point) => {
+          const proximityMatches = pointFactOrderProximityMap.get(point.ClientId);
+          if (!proximityMatches || proximityMatches.size === 0) return false;
+
+          for (const key of selectedFactOrderSet) {
+            if (proximityMatches.has(key)) return true;
+          }
+
+          return false;
+        });
+
     if (!isJointCoverageOnly) {
-      return proximityFiltered;
+      return factOrderFiltered;
     }
 
-    return proximityFiltered.filter((point) => point.hasSales && point.hasOperator);
-  }, [searchedPoints, selectedProximitySet, pointProximityMap, isJointCoverageOnly]);
+    return factOrderFiltered.filter((point) => point.hasSales && point.hasOperator);
+  }, [searchedPoints, selectedProximitySet, pointProximityMap, selectedFactOrderSet, pointFactOrderProximityMap, isJointCoverageOnly]);
 
   const getProximityLabelsForPoint = (clientId: string) => {
     const matches = pointProximityMap.get(clientId);
@@ -442,56 +560,90 @@ export function CalendarGrid({ entries, deliveryScheduleEntries }: CalendarGridP
     setSelectedProximityKeys([]);
   };
 
+  const toggleFactOrderSelection = (key: FactOrderProximityKey) => {
+    setSelectedFactOrderKeys((current) =>
+      current.includes(key)
+        ? current.filter((item) => item !== key)
+        : [...current, key],
+    );
+  };
+
+  const clearFactOrderSelection = () => {
+    setSelectedFactOrderKeys([]);
+  };
+
   const clearSelectionFilters = () => {
     setSelectedRouteKeys([]);
     setRouteFilterText('');
     setSelectedProximityKeys([]);
+    setSelectedFactOrderKeys([]);
     setIsJointCoverageOnly(false);
     setIsRouteFilterOpen(false);
     setIsProximityFilterOpen(false);
+    setIsFactOrderFilterOpen(false);
   };
 
   const getCellContent = (pointCode: string, day: Date) => {
+    const normalizedPointCode = String(pointCode).trim();
     const scheduledEvents = entries.filter(
-      (entry) => entry.ClientId === pointCode && isScheduled(day, entry),
+      (entry) => String(entry.ClientId).trim() === normalizedPointCode && isScheduled(day, entry),
     );
 
-    if (scheduledEvents.length === 0) return null;
+    const visitFacts = visitHistoryMap.get(`${normalizedPointCode}::${formatDayKey(day)}`) ?? [];
+
+    if (scheduledEvents.length === 0 && visitFacts.length === 0) return null;
 
     const salesReps = scheduledEvents.filter((entry) => entry.Type === 'Торговый');
     const operators = scheduledEvents.filter((entry) => entry.Type === 'Оператор');
+    const factRoutes = Array.from(new Set(visitFacts.map((fact) => fact.RouteCode).filter(Boolean)));
+    const primaryFactRoute = factRoutes[0] ?? '';
+    const hasAnyPlan = salesReps.length > 0 || operators.length > 0;
+    const hasFact = visitFacts.length > 0;
+    const hasOrder = visitFacts.some((fact) => (fact.OrderAmountRub ?? 0) > 0);
+    const totalOrderAmount = Math.round(visitFacts.reduce((sum, fact) => sum + (fact.OrderAmountRub ?? 0), 0));
+    const deviations = visitFacts
+      .map((fact) => fact.CoordinateDeviationMeters)
+      .filter((meters): meters is number => typeof meters === 'number' && Number.isFinite(meters));
+    const hasDeviationWithin300 = deviations.some((meters) => meters <= 300);
+    const deviationsOver300 = deviations.filter((meters) => meters > 300);
+    const maxDeviationOver300 = !hasDeviationWithin300 && deviationsOver300.length > 0
+      ? Math.max(...deviationsOver300)
+      : null;
+    const minDeviation = deviations.length > 0 ? Math.min(...deviations) : null;
 
     return (
-      <div className="relative flex items-center justify-center w-full h-full min-h-[40px]">
+      <div className="relative flex items-center justify-center w-full h-full min-h-[52px] overflow-hidden px-0.5 py-0.5">
         {salesReps.map((rep, idx) => {
           const colorClass = getRouteColor(rep.RouteCode);
-          const hasOverlap = salesReps.length > 1 || operators.length > 0;
+          const hasOverlap = salesReps.length > 1 || operators.length > 0 || hasFact;
+          const hasTopBadges = !!maxDeviationOver300;
 
           return (
-            <div
-              key={`rep-${idx}`}
-              className={cn(
-                'absolute z-10 p-0.5 rounded-sm shadow-sm border transform transition-transform hover:scale-125 hover:z-50 cursor-help',
-                colorClass,
-                hasOverlap ? 'top-0 left-0' : '',
-              )}
-              title={`Торговый: ${getRouteLabel(rep.RouteCode, rep.Type)}`}
-            >
-              <User size={12} className="mx-auto" />
-              <span className="text-[7px] block text-center leading-none mt-0.5 font-bold">план</span>
-            </div>
+              <div
+                key={`rep-${idx}`}
+                className={cn(
+                  'absolute z-[1] flex h-[24px] w-[24px] flex-col items-center justify-center rounded-md border p-[1px] shadow-sm transform transition-transform hover:scale-110 hover:z-[2] cursor-help',
+                  colorClass,
+                  hasOverlap ? (hasTopBadges ? 'top-4 left-0' : 'top-0 left-0') : hasTopBadges ? 'top-4' : '',
+                )}
+                title={`Торговый: ${getRouteLabel(rep.RouteCode, rep.Type)}`}
+              >
+                <User size={10} className="mx-auto" />
+                <span className="text-[6px] block text-center leading-none mt-0.5 font-bold">план</span>
+              </div>
           );
         })}
 
         {operators.map((op, idx) => {
-          const hasOverlap = salesReps.length > 0 || operators.length > 1;
+          const hasOverlap = salesReps.length > 0 || operators.length > 1 || hasFact;
+          const hasTopBadges = !!maxDeviationOver300;
 
           return (
             <div
               key={`op-${idx}`}
               className={cn(
-                'absolute z-10 p-0.5 rounded-sm shadow-sm border transform transition-transform hover:scale-125 hover:z-50 cursor-help',
-                hasOverlap ? 'bottom-0 right-0' : '',
+                'absolute z-[1] flex h-[24px] w-[24px] flex-col items-center justify-center rounded-md border p-[1px] shadow-sm transform transition-transform hover:scale-110 hover:z-[2] cursor-help',
+                hasOverlap ? 'bottom-0 right-0' : hasTopBadges ? 'top-4 right-0' : '',
               )}
               style={{
                 backgroundColor: '#dcfce7',
@@ -500,11 +652,55 @@ export function CalendarGrid({ entries, deliveryScheduleEntries }: CalendarGridP
               }}
               title={`Оператор: ${getRouteLabel(op.RouteCode, op.Type)}`}
             >
-              <Headphones size={12} className="mx-auto" />
-              <span className="text-[7px] block text-center leading-none mt-0.5 font-bold">план</span>
+              <Headphones size={10} className="mx-auto" />
+              <span className="text-[6px] block text-center leading-none mt-0.5 font-bold">план</span>
             </div>
           );
         })}
+
+        {hasFact && (
+          <div
+            className={cn(
+              'absolute z-[2] flex h-[24px] w-[24px] flex-col items-center justify-center rounded-md border-2 p-[1px] shadow-md cursor-help ring-1 ring-white/90',
+              primaryFactRoute ? getRouteColor(primaryFactRoute) : 'border-slate-400 bg-slate-50 text-slate-700',
+                hasAnyPlan
+                  ? 'bottom-0 left-0'
+                  : maxDeviationOver300
+                    ? 'top-[30px] left-1/2 -translate-x-1/2'
+                    : 'top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2',
+            )}
+            title={[
+              `Факт: ${factRoutes.join(', ') || 'маршрут не указан'}`,
+              hasOrder ? `Сумма отгрузки: ${formatOrderAmount(totalOrderAmount)} ₽` : 'Сумма отгрузки: нет',
+              minDeviation !== null ? `Отклонение: ${formatDistanceKm(minDeviation)}` : 'Отклонение: нет данных',
+            ].join(' • ')}
+          >
+            {hasDeviationWithin300 ? (
+              <User size={10} className="mx-auto" strokeWidth={2.4} />
+            ) : (
+              <Accessibility size={10} className="mx-auto" strokeWidth={2.4} />
+            )}
+            <span
+              className={cn(
+                'block text-center leading-none mt-0.5 font-extrabold tracking-[0.02em]',
+                hasOrder ? 'text-[7px]' : 'text-[6px] uppercase',
+              )}
+            >
+              {hasOrder ? '₽' : 'факт'}
+            </span>
+          </div>
+        )}
+
+        {maxDeviationOver300 && (
+          <div className="absolute inset-x-0 top-0.5 z-[3] flex flex-col items-center gap-0.5 px-0.5">
+            <span
+              className="max-w-full whitespace-nowrap rounded-md bg-rose-200 px-1.5 py-[2px] text-[9px] font-black leading-none text-rose-900 shadow-sm"
+              title={`Отклонение: ${formatDistanceKm(maxDeviationOver300)}`}
+            >
+              {formatDistanceBadgeKm(maxDeviationOver300)}
+            </span>
+          </div>
+        )}
       </div>
     );
   };
@@ -539,6 +735,7 @@ export function CalendarGrid({ entries, deliveryScheduleEntries }: CalendarGridP
                 onClick={() => {
                   setIsRouteFilterOpen((prev) => !prev);
                   setIsProximityFilterOpen(false);
+                  setIsFactOrderFilterOpen(false);
                 }}
                 className={cn(
                   'flex items-center gap-2 rounded-md border bg-white px-3 py-2 text-sm text-gray-700 shadow-sm transition-colors',
@@ -667,7 +864,9 @@ export function CalendarGrid({ entries, deliveryScheduleEntries }: CalendarGridP
                 onClick={() => {
                   setIsProximityFilterOpen((prev) => !prev);
                   setIsRouteFilterOpen(false);
+                  setIsFactOrderFilterOpen(false);
                 }}
+                title="Близость плановых визитов"
                 className={cn(
                   'flex items-center gap-2 rounded-md border bg-white px-3 py-2 text-sm text-gray-700 shadow-sm transition-colors',
                   isProximityFilterOpen || selectedProximityKeys.length > 0
@@ -676,18 +875,18 @@ export function CalendarGrid({ entries, deliveryScheduleEntries }: CalendarGridP
                 )}
               >
                 <Filter size={16} className="text-gray-500" />
-                <span className="font-medium">Близость визитов</span>
+                <span className="font-medium" title="Близость плановых визитов ТП и Оператора">Близость ПВ</span>
                 <span className="text-xs text-gray-500">
                   {selectedProximityKeys.length > 0 ? `выбрано: ${selectedProximityKeys.length}` : 'все'}
                 </span>
               </button>
 
               {isProximityFilterOpen && (
-                <div className="absolute left-0 top-full z-[9999] mt-2 w-[360px] rounded-xl border border-gray-200 bg-white shadow-2xl">
+                <div className="absolute left-0 top-full z-[9999] mt-2 w-[380px] rounded-xl border border-gray-200 bg-white shadow-2xl">
                   <div className="border-b border-gray-100 p-3">
                     <div className="mb-3 flex items-center justify-between gap-2">
                       <div>
-                        <div className="text-sm font-semibold text-gray-900">Фильтр близости визитов</div>
+                        <div className="text-sm font-semibold text-gray-900">Фильтр близости плановых визитов</div>
                         <div className="text-xs text-gray-500">Можно выбрать один или несколько параметров</div>
                       </div>
                       <button
@@ -735,9 +934,97 @@ export function CalendarGrid({ entries, deliveryScheduleEntries }: CalendarGridP
                             <Check size={12} />
                           </span>
 
-                          <div className="min-w-0">
+                          <div className="min-w-0 flex-1">
                             <div className="text-sm font-medium text-gray-800">{option.label}</div>
-                            <div className="text-xs text-gray-500">{option.description}</div>
+                            <div className="text-xs leading-snug text-gray-500 break-words whitespace-normal">{option.description}</div>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => {
+                  setIsFactOrderFilterOpen((prev) => !prev);
+                  setIsRouteFilterOpen(false);
+                  setIsProximityFilterOpen(false);
+                }}
+                title="Близость факт заказ ТП от визита Оператора"
+                className={cn(
+                  'flex items-center gap-2 rounded-md border bg-white px-3 py-2 text-sm text-gray-700 shadow-sm transition-colors',
+                  isFactOrderFilterOpen || selectedFactOrderKeys.length > 0
+                    ? 'border-blue-300 ring-2 ring-blue-100'
+                    : 'border-gray-300 hover:border-gray-400',
+                )}
+              >
+                <Filter size={16} className="text-gray-500" />
+                <span className="font-medium" title="Близость фактического заказа ТП к плановому визиту оператора.">Близость ФЗ</span>
+                <span className="text-xs text-gray-500">
+                  {selectedFactOrderKeys.length > 0 ? `выбрано: ${selectedFactOrderKeys.length}` : 'все'}
+                </span>
+              </button>
+
+              {isFactOrderFilterOpen && (
+                <div className="absolute left-0 top-full z-[9999] mt-2 w-[380px] rounded-xl border border-gray-200 bg-white shadow-2xl">
+                  <div className="border-b border-gray-100 p-3">
+                    <div className="mb-3 flex items-center justify-between gap-2">
+                      <div>
+                        <div className="text-sm font-semibold text-gray-900">Фильтр близости факт-заказов</div>
+                        <div className="text-xs text-gray-500">Можно выбрать один или несколько параметров</div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setIsFactOrderFilterOpen(false)}
+                        className="rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600"
+                        title="Закрыть"
+                      >
+                        <X size={16} />
+                      </button>
+                    </div>
+
+                    <div className="flex items-center justify-end gap-2 text-xs">
+                      <button
+                        type="button"
+                        onClick={clearFactOrderSelection}
+                        className="font-medium text-gray-500 hover:text-gray-700"
+                      >
+                        Сбросить
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="p-2">
+                    {FACT_ORDER_PROXIMITY_OPTIONS.map((option) => {
+                      const isSelected = selectedFactOrderSet.has(option.key);
+
+                      return (
+                        <button
+                          key={option.key}
+                          type="button"
+                          onClick={() => toggleFactOrderSelection(option.key)}
+                          className="flex w-full items-start gap-3 rounded-lg px-2 py-2 text-left hover:bg-gray-50"
+                          aria-pressed={isSelected}
+                          aria-label={`Выбрать фильтр ${option.label}`}
+                        >
+                          <span
+                            className={cn(
+                              'mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded border transition-colors',
+                              isSelected
+                                ? 'border-blue-600 bg-blue-600 text-white'
+                                : 'border-gray-300 bg-white text-transparent',
+                            )}
+                          >
+                            <Check size={12} />
+                          </span>
+
+                          <div className="min-w-0 flex-1">
+                            <div className="text-sm font-medium text-gray-800">{option.label}</div>
+                            <div className="text-xs leading-snug text-gray-500 break-words whitespace-normal">{option.description}</div>
                           </div>
                         </button>
                       );
@@ -759,13 +1046,13 @@ export function CalendarGrid({ entries, deliveryScheduleEntries }: CalendarGridP
               title="Показать только точки, которые одновременно посещаются торговым и оператором"
             >
               <Check size={16} className={isJointCoverageOnly ? 'text-blue-600' : 'text-gray-400'} />
-              <span className="font-medium">Совместное покрытие</span>
+              <span className="font-medium">Общее</span>
             </button>
 
             <div className="text-sm text-gray-500 shrink-0">Всего точек: {filteredPoints.length}</div>
           </div>
 
-          <div className="flex items-center gap-1.5 bg-white px-2.5 py-1.5 rounded-md border shadow-sm shrink-0">
+          <div className="flex items-center gap-1 bg-white px-2 py-1 rounded-md border shadow-sm shrink-0">
             <button onClick={prevMonth} className="p-1 hover:bg-gray-100 rounded-full">
               <ChevronLeft size={18} />
             </button>
@@ -818,11 +1105,26 @@ export function CalendarGrid({ entries, deliveryScheduleEntries }: CalendarGridP
 
               {selectedProximityLabels.length > 0 && (
                 <div className="flex items-center gap-2 flex-wrap">
-                  <span className="text-xs font-medium text-gray-500">Близость визитов:</span>
+                  <span className="text-xs font-medium text-gray-500">Близость ПВ:</span>
                   {selectedProximityLabels.map((label) => (
                     <span
                       key={label}
                       className="inline-flex items-center rounded-full border border-violet-200 bg-violet-50 px-2 py-1 text-xs font-medium text-violet-700"
+                      title={label}
+                    >
+                      {label}
+                    </span>
+                  ))}
+                </div>
+              )}
+
+              {selectedFactOrderLabels.length > 0 && (
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-xs font-medium text-gray-500">Близость ФЗ:</span>
+                  {selectedFactOrderLabels.map((label) => (
+                    <span
+                      key={label}
+                      className="inline-flex items-center rounded-full border border-amber-200 bg-amber-50 px-2 py-1 text-xs font-medium text-amber-700"
                       title={label}
                     >
                       {label}
@@ -838,7 +1140,7 @@ export function CalendarGrid({ entries, deliveryScheduleEntries }: CalendarGridP
                     className="inline-flex items-center rounded-full border border-emerald-200 bg-emerald-50 px-2 py-1 text-xs font-medium text-emerald-700"
                     title="Показаны только точки с одновременным покрытием торгового и оператора"
                   >
-                    Совместное покрытие
+                    Общее
                   </span>
                 </div>
               )}
@@ -848,7 +1150,7 @@ export function CalendarGrid({ entries, deliveryScheduleEntries }: CalendarGridP
               type="button"
               onClick={clearSelectionFilters}
               className="inline-flex shrink-0 items-center gap-2 rounded-md border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-700 shadow-sm transition-colors hover:border-gray-400 hover:bg-gray-50"
-              title="Очистить выбранные маршруты, близость визитов и совместное покрытие"
+              title="Очистить выбранные маршруты, близость ПВ, близость ФЗ и общее покрытие"
             >
               <RotateCcw size={16} className="text-gray-500" />
               <span>Очистить все фильтры</span>
@@ -861,7 +1163,7 @@ export function CalendarGrid({ entries, deliveryScheduleEntries }: CalendarGridP
         <table className="table-fixed w-full border-separate border-spacing-0">
           <thead>
             <tr>
-              <th className="sticky top-0 left-0 z-30 bg-gray-50 border-b border-r p-2 text-left w-[250px] min-w-[200px] text-xs font-semibold text-gray-600 uppercase tracking-wider h-10 shadow-sm">
+              <th className="sticky top-0 left-0 z-[80] bg-gray-50 border-b border-r p-2 text-left w-[250px] min-w-[200px] text-xs font-semibold text-gray-600 uppercase tracking-wider h-10 shadow-sm">
                 Точка Доставки
               </th>
               {daysInMonth.map((day) => {
@@ -871,7 +1173,7 @@ export function CalendarGrid({ entries, deliveryScheduleEntries }: CalendarGridP
                   <th
                     key={day.toISOString()}
                     className={cn(
-                      'sticky top-0 z-20 border-b border-r border-gray-200 p-0.5 text-center h-10 shadow-sm',
+                      'sticky top-0 z-[70] border-b border-r border-gray-200 p-0.5 text-center h-10 shadow-sm',
                       isWeekend
                         ? isToday(day)
                           ? 'bg-red-100'
@@ -958,7 +1260,7 @@ export function CalendarGrid({ entries, deliveryScheduleEntries }: CalendarGridP
                       <td
                         key={day.toISOString()}
                         className={cn(
-                          'border-r border-b border-gray-200 p-0 relative h-16 align-top',
+                          'border-r border-b border-gray-200 p-0 relative h-[76px] align-top overflow-hidden',
                           hasDelivery
                             ? 'bg-green-50'
                             : isWeekend
