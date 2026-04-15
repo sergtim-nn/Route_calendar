@@ -13,7 +13,7 @@ import {
   parse,
 } from 'date-fns';
 import { ru } from 'date-fns/locale';
-import { ChevronLeft, ChevronRight, User, Headphones, Filter, X, Check, Download, RotateCcw, Accessibility } from 'lucide-react';
+import { ChevronLeft, ChevronRight, User, Headphones, Filter, X, Check, Download, RotateCcw, Accessibility, FileText } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { DeliveryScheduleEntry, ScheduleEntry, VisitHistoryEntry, isScheduled, isDeliveryScheduled, getRouteColor, cn } from '../utils/schedule';
 
@@ -94,6 +94,34 @@ const FACT_ORDER_PROXIMITY_OPTIONS: FactOrderProximityOption[] = [
     description: 'Фактический заказ ТП отстоит от планового визита оператора на 2 дня',
   },
 ];
+
+const EXPORT_ROUTE_COLORS = [
+  { bg: '#fee2e2', text: '#dc2626', border: '#fecaca' },
+  { bg: '#dbeafe', text: '#2563eb', border: '#bfdbfe' },
+  { bg: '#dcfce7', text: '#16a34a', border: '#bbf7d0' },
+  { bg: '#fef3c7', text: '#d97706', border: '#fde68a' },
+  { bg: '#f3e8ff', text: '#9333ea', border: '#e9d5ff' },
+  { bg: '#fce7f3', text: '#db2777', border: '#fbcfe8' },
+  { bg: '#e0e7ff', text: '#4f46e5', border: '#c7d2fe' },
+  { bg: '#ffedd5', text: '#ea580c', border: '#fed7aa' },
+];
+
+const getExportRouteColor = (routeCode: string) => {
+  let hash = 0;
+  for (let i = 0; i < routeCode.length; i++) {
+    hash = routeCode.charCodeAt(i) + ((hash << 5) - hash);
+  }
+
+  return EXPORT_ROUTE_COLORS[Math.abs(hash) % EXPORT_ROUTE_COLORS.length];
+};
+
+const escapeHtml = (value: unknown) =>
+  String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 
 export function CalendarGrid({ entries, deliveryScheduleEntries, visitHistoryEntries }: CalendarGridProps) {
   const [currentDate, setCurrentDate] = useState(new Date());
@@ -522,6 +550,228 @@ export function CalendarGrid({ entries, deliveryScheduleEntries, visitHistoryEnt
 
     const fileMonth = format(currentDate, 'yyyy-MM');
     XLSX.writeFile(workbook, `точки_${fileMonth}.xlsx`);
+  };
+
+  const buildShareCellHtml = (pointCode: string, day: Date) => {
+    const normalizedPointCode = String(pointCode).trim();
+    const scheduledEvents = entries.filter(
+      (entry) => String(entry.ClientId).trim() === normalizedPointCode && isScheduled(day, entry),
+    );
+    const visitFacts = visitHistoryMap.get(`${normalizedPointCode}::${formatDayKey(day)}`) ?? [];
+
+    if (scheduledEvents.length === 0 && visitFacts.length === 0) return '';
+
+    const salesReps = scheduledEvents.filter((entry) => entry.Type === 'Торговый');
+    const operators = scheduledEvents.filter((entry) => entry.Type === 'Оператор');
+    const factRoutes = Array.from(new Set(visitFacts.map((fact) => fact.RouteCode).filter(Boolean)));
+    const hasOrder = visitFacts.some((fact) => (fact.OrderAmountRub ?? 0) > 0);
+    const totalOrderAmount = Math.round(visitFacts.reduce((sum, fact) => sum + (fact.OrderAmountRub ?? 0), 0));
+    const deviations = visitFacts
+      .map((fact) => fact.CoordinateDeviationMeters)
+      .filter((meters): meters is number => typeof meters === 'number' && Number.isFinite(meters));
+    const hasDeviationWithin300 = deviations.some((meters) => meters <= 300);
+    const deviationsOver300 = deviations.filter((meters) => meters > 300);
+    const maxDeviationOver300 = !hasDeviationWithin300 && deviationsOver300.length > 0
+      ? Math.max(...deviationsOver300)
+      : null;
+    const minDeviation = deviations.length > 0 ? Math.min(...deviations) : null;
+
+    const salesBadges = salesReps.map((rep) => {
+      const color = getExportRouteColor(rep.RouteCode);
+      return `<span class="marker sales-marker" style="background:${color.bg};border-color:${color.border};color:${color.text}" title="${escapeHtml(`Торговый: ${getRouteLabel(rep.RouteCode, rep.Type)}`)}">ТП</span>`;
+    });
+
+    const operatorBadges = operators.map((op) =>
+      `<span class="marker operator-marker" title="${escapeHtml(`Оператор: ${getRouteLabel(op.RouteCode, op.Type)}`)}">О</span>`,
+    );
+
+    const factBadges = visitFacts.length > 0
+      ? [
+          `<span class="marker fact-marker ${hasOrder ? 'fact-order' : ''}" title="${escapeHtml([
+            `Факт: ${factRoutes.join(', ') || 'маршрут не указан'}`,
+            hasOrder ? `Сумма отгрузки: ${formatOrderAmount(totalOrderAmount)} руб.` : 'Сумма отгрузки: нет',
+            minDeviation !== null ? `Отклонение: ${formatDistanceKm(minDeviation)}` : 'Отклонение: нет данных',
+          ].join(' | '))}">${hasOrder ? '₽' : 'Ф'}</span>`,
+        ]
+      : [];
+
+    const deviationBadge = maxDeviationOver300
+      ? `<span class="marker deviation-marker" title="${escapeHtml(`Отклонение: ${formatDistanceKm(maxDeviationOver300)}`)}">${escapeHtml(formatDistanceBadgeKm(maxDeviationOver300))}</span>`
+      : '';
+
+    return `<div class="cell-events">${[...salesBadges, ...operatorBadges, ...factBadges, deviationBadge].filter(Boolean).join('')}</div>`;
+  };
+
+  const exportCurrentViewToHtml = () => {
+    const monthLabel = format(currentDate, 'LLLL yyyy', { locale: ru });
+    const exportedAt = format(new Date(), 'dd.MM.yyyy HH:mm');
+    const filterItems = [
+      filterText.trim() ? `Поиск: ${filterText.trim()}` : '',
+      selectedRouteLabels.length > 0 ? `Маршруты: ${selectedRouteLabels.join(', ')}` : '',
+      selectedProximityLabels.length > 0 ? `Близость ПВ: ${selectedProximityLabels.join(', ')}` : '',
+      selectedFactOrderLabels.length > 0 ? `Близость ФЗ: ${selectedFactOrderLabels.join(', ')}` : '',
+      isJointCoverageOnly ? 'Покрытие: общее' : '',
+    ].filter(Boolean);
+
+    const headCells = daysInMonth.map((day) => {
+      const isWeekend = [0, 6].includes(getDay(day));
+      return `
+        <th class="${isWeekend ? 'weekend' : ''}">
+          <div class="weekday">${escapeHtml(format(day, 'EEEEEE', { locale: ru }))}</div>
+          <div class="daynum">${getDate(day)}</div>
+        </th>
+      `;
+    }).join('');
+
+    const bodyRows = filteredPoints.length === 0
+      ? `<tr><td class="empty" colspan="${daysInMonth.length + 1}">Нет данных для отображения.</td></tr>`
+      : filteredPoints.map((point) => {
+          const rows = daysInMonth.map((day) => {
+            const hasDelivery = isPointDeliveryScheduled(point, day);
+            const isWeekend = [0, 6].includes(getDay(day));
+            const cellClass = [
+              hasDelivery ? 'delivery' : '',
+              isWeekend ? 'weekend-cell' : '',
+            ].filter(Boolean).join(' ');
+
+            return `<td class="${cellClass}">${buildShareCellHtml(point.ClientId, day)}</td>`;
+          }).join('');
+
+          return `
+            <tr>
+              <td class="point">
+                <div class="branch">${escapeHtml(point.Branch)}</div>
+                <div class="name">${escapeHtml(point.Name)}</div>
+                <div class="address">${escapeHtml(point.Address)}</div>
+                <div class="meta">
+                  <span>${escapeHtml(point.ClientId)}</span>
+                  ${point.hasSales ? '<span class="mini sales">ТП</span>' : ''}
+                  ${point.hasOperator ? '<span class="mini operator">О</span>' : ''}
+                  ${point.DeliveryZone ? `<span class="zone" title="${escapeHtml(getDeliveryScheduleSummary(point))}">${escapeHtml(getDeliveryScheduleSummary(point))}</span>` : ''}
+                </div>
+              </td>
+              ${rows}
+            </tr>
+          `;
+        }).join('');
+
+    const html = `<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Календарь маршрутов - ${escapeHtml(monthLabel)}</title>
+  <style>
+    :root { color-scheme: light; font-family: Inter, Arial, sans-serif; color: #111827; background: #edf2f7; }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body { margin: 0; overflow: hidden; background: #edf2f7; }
+    .screen { display: grid; grid-template-rows: auto 1fr; height: 100vh; padding: 12px; gap: 10px; }
+    header { min-height: 0; background: #ffffff; border: 1px solid #d7dee8; border-radius: 8px; padding: 12px 14px; box-shadow: 0 6px 18px rgba(15, 23, 42, 0.08); }
+    .title-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+    h1 { margin: 0; font-size: 20px; line-height: 1.15; letter-spacing: 0; }
+    .exported { flex-shrink: 0; color: #64748b; font-size: 12px; text-align: right; }
+    .summary { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 8px; color: #475569; font-size: 12px; }
+    .chip { display: inline-flex; align-items: center; max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border: 1px solid #bfdbfe; background: #eff6ff; color: #1d4ed8; border-radius: 999px; padding: 3px 8px; font-weight: 700; }
+    .legend { display: flex; flex-wrap: wrap; gap: 6px 12px; margin-top: 8px; font-size: 11px; color: #64748b; }
+    .legend-mark { display: inline-flex; height: 18px; min-width: 18px; align-items: center; justify-content: center; border-radius: 5px; padding: 0 5px; font-size: 10px; font-weight: 900; }
+    .wrap { min-height: 0; }
+    .table-wrap { height: 100%; overflow: auto; border: 1px solid #d7dee8; border-radius: 8px; background: #ffffff; box-shadow: 0 10px 26px rgba(15, 23, 42, 0.1); }
+    table { width: 100%; min-width: 1180px; border-collapse: separate; border-spacing: 0; table-layout: fixed; }
+    th, td { border-right: 1px solid #e2e8f0; border-bottom: 1px solid #e2e8f0; }
+    th { position: sticky; top: 0; z-index: 3; width: 36px; min-width: 36px; height: 34px; padding: 2px; background: #ffffff; text-align: center; }
+    th.first { left: 0; z-index: 4; width: 230px; min-width: 230px; text-align: left; background: #f8fafc; color: #475569; font-size: 11px; text-transform: uppercase; }
+    th.weekend { background: #fff1f2; }
+    .weekday { color: #94a3b8; font-size: 8px; text-transform: capitalize; line-height: 1; }
+    .daynum { color: #0f172a; font-size: 12px; font-weight: 900; line-height: 1.15; }
+    td { width: 36px; min-width: 36px; height: 44px; padding: 2px; vertical-align: middle; background: #ffffff; }
+    td.weekend-cell { background: #fff7f7; }
+    td.delivery { background: #eefbf3; }
+    td.point { position: sticky; left: 0; z-index: 2; width: 230px; min-width: 230px; background: #ffffff; padding: 5px 7px; }
+    .branch { color: #64748b; font-size: 8px; font-weight: 800; text-transform: uppercase; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .name { margin-top: 1px; color: #0f172a; font-size: 11px; font-weight: 900; line-height: 1.15; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .address { margin-top: 1px; color: #64748b; font-size: 8px; line-height: 1.15; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .meta { display: flex; flex-wrap: nowrap; gap: 3px; align-items: center; margin-top: 3px; color: #64748b; font-size: 8px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow: hidden; }
+    .zone { color: #15803d; font-family: Inter, Arial, sans-serif; font-weight: 700; }
+    .mini { border-radius: 4px; padding: 1px 4px; font-family: Inter, Arial, sans-serif; font-weight: 800; }
+    .mini.sales { background: #fee2e2; color: #dc2626; }
+    .mini.operator { background: #dcfce7; color: #16a34a; }
+    .cell-events { display: flex; width: 100%; height: 100%; align-items: center; justify-content: center; gap: 2px; flex-wrap: wrap; overflow: hidden; }
+    .marker { display: inline-flex; width: 18px; height: 18px; align-items: center; justify-content: center; flex: 0 0 auto; border: 1px solid #e5e7eb; border-radius: 5px; font-size: 8px; line-height: 1; font-weight: 900; letter-spacing: 0; box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08); }
+    .operator-marker { background: #dcfce7; border-color: #86efac; color: #16a34a; }
+    .fact-marker { background: #f8fafc; border-color: #94a3b8; color: #334155; }
+    .fact-order { background: #fef3c7; border-color: #f59e0b; color: #92400e; font-size: 11px; }
+    .deviation-marker { min-width: 22px; width: auto; padding: 0 3px; background: #ffe4e6; border-color: #fb7185; color: #9f1239; }
+    .empty { width: auto; height: 120px; text-align: center; color: #6b7280; font-size: 14px; }
+    @media (max-width: 1300px) {
+      .screen { padding: 8px; gap: 8px; }
+      header { padding: 10px 12px; }
+      h1 { font-size: 18px; }
+      table { min-width: 1040px; }
+      th, td { width: 32px; min-width: 32px; }
+      td { height: 40px; }
+      .marker { width: 16px; height: 16px; font-size: 7px; }
+      .deviation-marker { min-width: 20px; }
+    }
+    @media print {
+      body { overflow: visible; background: #ffffff; }
+      .screen { display: block; height: auto; padding: 0; }
+      header, th, td.point { position: static; }
+      .wrap { padding: 0; height: auto; }
+      .table-wrap { box-shadow: none; border: 0; }
+    }
+  </style>
+</head>
+<body>
+  <div class="screen">
+    <header>
+      <div class="title-row">
+        <h1>Календарь маршрутов: ${escapeHtml(monthLabel)}</h1>
+        <div class="exported">Экспортировано<br>${escapeHtml(exportedAt)}</div>
+      </div>
+      <div class="summary">
+        <span>Видимых точек: <strong>${filteredPoints.length}</strong></span>
+        <span>Маршрутных записей: <strong>${entries.length}</strong></span>
+        <span>Зон доставки: <strong>${deliveryScheduleEntries.length}</strong></span>
+        <span>Фактов визитов: <strong>${visitHistoryEntries.length}</strong></span>
+        ${filterItems.length > 0 ? filterItems.map((item) => `<span class="chip">${escapeHtml(item)}</span>`).join('') : '<span class="chip">Фильтры не применены</span>'}
+      </div>
+      <div class="legend">
+        <span><span class="legend-mark" style="background:#fee2e2;color:#dc2626">ТП</span> план торгового</span>
+        <span><span class="legend-mark" style="background:#dcfce7;color:#16a34a">О</span> план оператора</span>
+        <span><span class="legend-mark" style="background:#f8fafc;color:#334155;border:1px solid #94a3b8">Ф</span> факт</span>
+        <span><span class="legend-mark" style="background:#fef3c7;color:#92400e">₽</span> факт с заказом</span>
+        <span><span class="legend-mark" style="background:#eefbf3;color:#15803d">Д</span> день доставки</span>
+      </div>
+    </header>
+    <main class="wrap">
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th class="first">Точка доставки</th>
+              ${headCells}
+            </tr>
+          </thead>
+          <tbody>
+            ${bodyRows}
+          </tbody>
+        </table>
+      </div>
+    </main>
+  </div>
+</body>
+</html>`;
+
+    const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `календарь_маршрутов_${format(currentDate, 'yyyy-MM')}.html`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
   };
 
   const prevMonth = () => setCurrentDate(subMonths(currentDate, 1));
@@ -1065,6 +1315,22 @@ export function CalendarGrid({ entries, deliveryScheduleEntries, visitHistoryEnt
           </div>
 
           <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={exportCurrentViewToHtml}
+              disabled={filteredPoints.length === 0}
+              className={cn(
+                'inline-flex items-center gap-2 rounded-md border bg-white px-3 py-2 text-sm font-medium shadow-sm transition-colors',
+                filteredPoints.length === 0
+                  ? 'cursor-not-allowed border-gray-200 text-gray-400'
+                  : 'border-gray-300 text-gray-700 hover:border-gray-400 hover:bg-gray-50',
+              )}
+              title="Сохранить текущий экран с фильтрами и календарем в HTML для просмотра без приложения"
+            >
+              <FileText size={16} className={filteredPoints.length === 0 ? 'text-gray-300' : 'text-gray-500'} />
+              <span>HTML для просмотра</span>
+            </button>
+
             <button
               type="button"
               onClick={exportFilteredPointsToExcel}
