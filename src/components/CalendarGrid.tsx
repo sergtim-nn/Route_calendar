@@ -1328,7 +1328,7 @@ export function CalendarGrid({ entries, deliveryScheduleEntries, visitHistoryEnt
               title="Сохранить текущий экран с фильтрами и календарем в HTML для просмотра без приложения"
             >
               <FileText size={16} className={filteredPoints.length === 0 ? 'text-gray-300' : 'text-gray-500'} />
-              <span>HTML для просмотра</span>
+              <span>HTML</span>
             </button>
 
             <button
