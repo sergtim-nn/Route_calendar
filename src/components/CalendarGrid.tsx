@@ -11,6 +11,7 @@ import {
   getDate,
   differenceInCalendarDays,
   parse,
+  isSameDay,
 } from 'date-fns';
 import { ru } from 'date-fns/locale';
 import { ChevronLeft, ChevronRight, User, Headphones, Filter, X, Check, Download, RotateCcw, Accessibility, FileText } from 'lucide-react';
@@ -53,6 +54,13 @@ type FactOrderProximityOption = {
   key: FactOrderProximityKey;
   label: string;
   description: string;
+};
+
+type FactOrderContourSides = {
+  top: boolean;
+  right: boolean;
+  bottom: boolean;
+  left: boolean;
 };
 
 const getRouteSelectionKey = (routeCode: string, type: 'Торговый' | 'Оператор') => `${routeCode}::${type}`;
@@ -122,6 +130,13 @@ const escapeHtml = (value: unknown) =>
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+
+const getFactOrderProximityKeyByDiff = (diff: number): FactOrderProximityKey | null => {
+  if (diff === 0) return 'fo-same-day';
+  if (diff === 1) return 'fo-pm1';
+  if (diff === 2) return 'fo-pm2';
+  return null;
+};
 
 export function CalendarGrid({ entries, deliveryScheduleEntries, visitHistoryEntries }: CalendarGridProps) {
   const [currentDate, setCurrentDate] = useState(new Date());
@@ -429,9 +444,8 @@ export function CalendarGrid({ entries, deliveryScheduleEntries, visitHistoryEnt
       factOrderDates.forEach((factDate) => {
         operatorDates.forEach((operatorDay) => {
           const diff = Math.abs(differenceInCalendarDays(operatorDay, factDate));
-          if (diff === 0) matches.add('fo-same-day');
-          if (diff === 1) matches.add('fo-pm1');
-          if (diff === 2) matches.add('fo-pm2');
+          const matchKey = getFactOrderProximityKeyByDiff(diff);
+          if (matchKey) matches.add(matchKey);
         });
       });
 
@@ -444,6 +458,63 @@ export function CalendarGrid({ entries, deliveryScheduleEntries, visitHistoryEnt
   const selectedRouteSet = useMemo(() => new Set(selectedRouteKeys), [selectedRouteKeys]);
   const selectedProximitySet = useMemo(() => new Set(selectedProximityKeys), [selectedProximityKeys]);
   const selectedFactOrderSet = useMemo(() => new Set(selectedFactOrderKeys), [selectedFactOrderKeys]);
+
+  const factOrderContourMap = useMemo(() => {
+    const map = new Map<string, FactOrderContourSides>();
+    if (selectedFactOrderSet.size === 0) return map;
+
+    const setContourSide = (clientId: string, day: Date, sides: Partial<FactOrderContourSides>) => {
+      const key = `${clientId}::${formatDayKey(day)}`;
+      const current = map.get(key) ?? { top: false, right: false, bottom: false, left: false };
+      map.set(key, {
+        top: current.top || !!sides.top,
+        right: current.right || !!sides.right,
+        bottom: current.bottom || !!sides.bottom,
+        left: current.left || !!sides.left,
+      });
+    };
+
+    pointMetaMap.forEach((point, clientId) => {
+      if (!point.hasOperator) return;
+
+      const pointEntries = pointEntriesMap.get(clientId) ?? [];
+      const operatorDates = daysInMonth.filter((day) =>
+        pointEntries.some((entry) => entry.Type === 'Оператор' && isScheduled(day, entry)),
+      );
+
+      if (operatorDates.length === 0) return;
+
+      const factOrderDates = visitHistoryEntries
+        .filter((entry) => String(entry.ClientId).trim() === clientId && (entry.OrderAmountRub ?? 0) > 0)
+        .map((entry) => parse(String(entry.Date).trim(), 'dd.MM.yyyy', new Date()))
+        .filter((date) => !Number.isNaN(date.getTime()));
+
+      factOrderDates.forEach((factDate) => {
+        operatorDates.forEach((operatorDay) => {
+          const diff = Math.abs(differenceInCalendarDays(operatorDay, factDate));
+          const matchKey = getFactOrderProximityKeyByDiff(diff);
+          if (!matchKey || !selectedFactOrderSet.has(matchKey)) return;
+
+          const startDate = differenceInCalendarDays(operatorDay, factDate) >= 0 ? factDate : operatorDay;
+          const endDate = differenceInCalendarDays(operatorDay, factDate) >= 0 ? operatorDay : factDate;
+          const contourDays = daysInMonth.filter((day) =>
+            differenceInCalendarDays(day, startDate) >= 0 && differenceInCalendarDays(endDate, day) >= 0,
+          );
+
+          contourDays.forEach((day) => {
+            setContourSide(clientId, day, {
+              top: true,
+              bottom: true,
+              left: isSameDay(day, startDate),
+              right: isSameDay(day, endDate),
+            });
+          });
+        });
+      });
+    });
+
+    return map;
+  }, [daysInMonth, pointEntriesMap, pointMetaMap, selectedFactOrderSet, visitHistoryEntries]);
 
   const selectedRouteLabels = useMemo(
     () => routeOptions.filter((option) => selectedRouteSet.has(option.key)).map((option) => option.label),
@@ -503,6 +574,21 @@ export function CalendarGrid({ entries, deliveryScheduleEntries, visitHistoryEnt
     return PROXIMITY_OPTIONS.filter((option) => matches.has(option.key))
       .map((option) => option.label)
       .join(', ');
+  };
+
+  const getFactOrderContourSides = (clientId: string, day: Date) =>
+    factOrderContourMap.get(`${String(clientId).trim()}::${formatDayKey(day)}`);
+
+  const getFactOrderContourClassName = (sides?: FactOrderContourSides) => {
+    if (!sides) return '';
+
+    return cn(
+      'fact-order-contour',
+      sides.top && 'fact-order-contour-top',
+      sides.right && 'fact-order-contour-right',
+      sides.bottom && 'fact-order-contour-bottom',
+      sides.left && 'fact-order-contour-left',
+    );
   };
 
   const exportRows = useMemo(() => {
@@ -629,9 +715,11 @@ export function CalendarGrid({ entries, deliveryScheduleEntries, visitHistoryEnt
           const rows = daysInMonth.map((day) => {
             const hasDelivery = isPointDeliveryScheduled(point, day);
             const isWeekend = [0, 6].includes(getDay(day));
+            const contourSides = getFactOrderContourSides(point.ClientId, day);
             const cellClass = [
               hasDelivery ? 'delivery' : '',
               isWeekend ? 'weekend-cell' : '',
+              getFactOrderContourClassName(contourSides),
             ].filter(Boolean).join(' ');
 
             return `<td class="${cellClass}">${buildShareCellHtml(point.ClientId, day)}</td>`;
@@ -685,6 +773,11 @@ export function CalendarGrid({ entries, deliveryScheduleEntries, visitHistoryEnt
     .weekday { color: #94a3b8; font-size: 8px; text-transform: capitalize; line-height: 1; }
     .daynum { color: #0f172a; font-size: 12px; font-weight: 900; line-height: 1.15; }
     td { width: 36px; min-width: 36px; height: 44px; padding: 2px; vertical-align: middle; background: #ffffff; }
+    td.fact-order-contour { position: relative; z-index: 1; }
+    td.fact-order-contour-top { border-top: 3px solid #ef4444; }
+    td.fact-order-contour-right { border-right: 3px solid #ef4444; }
+    td.fact-order-contour-bottom { border-bottom: 3px solid #ef4444; }
+    td.fact-order-contour-left { border-left: 3px solid #ef4444; }
     td.weekend-cell { background: #fff7f7; }
     td.delivery { background: #eefbf3; }
     td.point { position: sticky; left: 0; z-index: 2; width: 230px; min-width: 230px; background: #ffffff; padding: 5px 7px; }
@@ -1521,6 +1614,7 @@ export function CalendarGrid({ entries, deliveryScheduleEntries, visitHistoryEnt
                   {daysInMonth.map((day) => {
                     const hasDelivery = isPointDeliveryScheduled(point, day);
                     const isWeekend = [0, 6].includes(getDay(day));
+                    const contourSides = getFactOrderContourSides(point.ClientId, day);
 
                     return (
                       <td
@@ -1534,6 +1628,17 @@ export function CalendarGrid({ entries, deliveryScheduleEntries, visitHistoryEnt
                               : 'bg-white',
                         )}
                       >
+                        {contourSides && (
+                          <div
+                            className={cn(
+                              'pointer-events-none absolute inset-[-1px] z-[4]',
+                              contourSides.top && 'border-t-[3px] border-t-red-600',
+                              contourSides.right && 'border-r-[3px] border-r-red-600',
+                              contourSides.bottom && 'border-b-[3px] border-b-red-600',
+                              contourSides.left && 'border-l-[3px] border-l-red-600',
+                            )}
+                          />
+                        )}
                         {getCellContent(point.ClientId, day)}
                       </td>
                     );
