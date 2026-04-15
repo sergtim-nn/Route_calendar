@@ -1320,15 +1320,15 @@ export function CalendarGrid({ entries, deliveryScheduleEntries, visitHistoryEnt
               onClick={exportCurrentViewToHtml}
               disabled={filteredPoints.length === 0}
               className={cn(
-                'inline-flex items-center gap-2 rounded-md border bg-white px-3 py-2 text-sm font-medium shadow-sm transition-colors',
+                'inline-flex h-10 w-10 items-center justify-center rounded-md border bg-white text-sm font-medium shadow-sm transition-colors',
                 filteredPoints.length === 0
                   ? 'cursor-not-allowed border-gray-200 text-gray-400'
                   : 'border-gray-300 text-gray-700 hover:border-gray-400 hover:bg-gray-50',
               )}
               title="Сохранить текущий экран с фильтрами и календарем в HTML для просмотра без приложения"
+              aria-label="Сохранить текущий экран в HTML"
             >
               <FileText size={16} className={filteredPoints.length === 0 ? 'text-gray-300' : 'text-gray-500'} />
-              <span>HTML</span>
             </button>
 
             <button
@@ -1336,15 +1336,15 @@ export function CalendarGrid({ entries, deliveryScheduleEntries, visitHistoryEnt
               onClick={exportFilteredPointsToExcel}
               disabled={exportRows.length === 0}
               className={cn(
-                'inline-flex items-center gap-2 rounded-md border bg-white px-3 py-2 text-sm font-medium shadow-sm transition-colors',
+                'inline-flex h-10 w-10 items-center justify-center rounded-md border bg-white text-sm font-medium shadow-sm transition-colors',
                 exportRows.length === 0
                   ? 'cursor-not-allowed border-gray-200 text-gray-400'
                   : 'border-gray-300 text-gray-700 hover:border-gray-400 hover:bg-gray-50',
               )}
               title="Выгрузить текущий отфильтрованный список точек в Excel"
+              aria-label="Экспортировать текущий список точек в Excel"
             >
               <Download size={16} className={exportRows.length === 0 ? 'text-gray-300' : 'text-gray-500'} />
-              <span>Экспорт в Excel</span>
             </button>
           </div>
         </div>

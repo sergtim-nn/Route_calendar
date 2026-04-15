@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import * as XLSX from 'xlsx';
 import { Upload, FileSpreadsheet, Loader2, Download, ArchiveRestore, Save } from 'lucide-react';
 import type { DeliveryScheduleEntry, ScheduleEntry, VisitHistoryEntry } from '../utils/schedule';
+import { parseVisitHistoryRow } from '../utils/parser';
 
 interface FileImportProps {
   onDataLoaded: (data: any[]) => void;
@@ -85,6 +86,71 @@ const formatVisitHistoryDateValue = (value: unknown): string => {
   }
 
   return normalizeEasyMerchHeader(value);
+};
+
+const normalizeVisitHistoryHeader = (value: unknown): string => String(value ?? '')
+  .replace(/\uFEFF/g, '')
+  .replace(/\u00A0/g, ' ')
+  .replace(/\u202F/g, ' ')
+  .replace(/\s+/g, ' ')
+  .trim()
+  .toLowerCase();
+
+const compactVisitHistoryHeader = (value: unknown): string => normalizeVisitHistoryHeader(value)
+  .replace(/[^a-zа-яё0-9]/gi, '');
+
+const isVisitHistoryDateHeader = (header: unknown): boolean => {
+  const normalized = normalizeVisitHistoryHeader(header);
+  return normalized === 'дата' || normalized === 'date' || normalized.includes('дата визита');
+};
+
+const getVisitHistoryHeaderScore = (row: Array<string | number | Date | null>): number => {
+  const compactHeaders = row.map(compactVisitHistoryHeader);
+  const hasAny = (values: string[]) => compactHeaders.some((header) => values.includes(header));
+  const hasPartial = (values: string[]) => compactHeaders.some((header) => values.some((value) => header.includes(value)));
+
+  let score = 0;
+  if (hasAny(['дата', 'date']) || hasPartial(['датавизита'])) score += 3;
+  if (hasAny(['маршрут', 'route', 'routecode', 'кодмаршрута'])) score += 2;
+  if (hasAny(['идклиента', 'idклиента', 'clientid', 'кодклиента', 'клиенткод', 'кодтт', 'idтт', 'точкадоставкикод'])) score += 3;
+  if (hasAny(['название', 'name', 'клиент', 'названиеклиента', 'наименованиеклиента', 'названиетт', 'наименованиетт'])) score += 1;
+  if (hasAny(['адрес', 'address', 'адресклиента', 'адрестт', 'фактическийадрес'])) score += 1;
+  if (hasPartial(['отклонениекоординат', 'суммазаказа'])) score += 1;
+
+  return score;
+};
+
+const findVisitHistoryHeaderIndex = (rows: Array<Array<string | number | Date | null>>): number => {
+  let bestIndex = 0;
+  let bestScore = 0;
+
+  rows.slice(0, 30).forEach((row, index) => {
+    const score = getVisitHistoryHeaderScore(row);
+    if (score > bestScore) {
+      bestScore = score;
+      bestIndex = index;
+    }
+  });
+
+  return bestScore >= 5 ? bestIndex : 0;
+};
+
+const buildVisitHistoryRowObject = (
+  headers: Array<string | number | Date | null>,
+  row: Array<string | number | Date | null>,
+): Record<string, unknown> => {
+  const result: Record<string, unknown> = {};
+
+  headers.forEach((header, index) => {
+    const headerName = String(header ?? '').trim();
+    if (!headerName) return;
+
+    result[headerName] = isVisitHistoryDateHeader(headerName)
+      ? formatVisitHistoryDateValue(row[index])
+      : row[index];
+  });
+
+  return result;
 };
 
 const routeTemplateHeaders = [
@@ -560,10 +626,18 @@ export function FileImportVisitHistory({ onVisitHistoryLoaded }: FileImportVisit
           throw new Error('Visit history sheet is empty');
         }
 
+        const headerIndex = findVisitHistoryHeaderIndex(rows);
+        const headers = rows[headerIndex];
+
         const parsedRows: Array<VisitHistoryEntry | null> = rows
-          .slice(1)
+          .slice(headerIndex + 1)
           .filter((row) => row.some((cell) => String(cell ?? '').trim() !== ''))
           .map((row) => {
+            const rowObject = buildVisitHistoryRowObject(headers, row);
+            const parsedByHeaders = parseVisitHistoryRow(rowObject);
+
+            if (parsedByHeaders) return parsedByHeaders;
+
             const date = formatVisitHistoryDateValue(row[0]);
             const routeCode = String(row[1] ?? '').trim();
             const clientId = String(row[2] ?? '').trim();

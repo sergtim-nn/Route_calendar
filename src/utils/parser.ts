@@ -200,9 +200,13 @@ export const parseDeliveryScheduleRow = (row: any): DeliveryScheduleEntry | null
 export const parseVisitHistoryRow = (row: any): VisitHistoryEntry | null => {
   const normalizeKey = (value: string) => value
     .replace(/\uFEFF/g, '')
+    .replace(/\u00A0/g, ' ')
+    .replace(/\u202F/g, ' ')
     .replace(/\s+/g, ' ')
     .trim()
     .toLowerCase();
+
+  const compactKey = (value: string) => normalizeKey(value).replace(/[^a-zа-яё0-9]/gi, '');
 
   const getVal = (keys: string[]) => {
     const rowKeys = Object.keys(row);
@@ -211,7 +215,11 @@ export const parseVisitHistoryRow = (row: any): VisitHistoryEntry | null => {
       if (row[key] !== undefined) return row[key];
 
       const normalizedTarget = normalizeKey(key);
-      const foundKey = rowKeys.find((k) => normalizeKey(k) === normalizedTarget);
+      const compactTarget = compactKey(key);
+      const foundKey = rowKeys.find((k) => (
+        normalizeKey(k) === normalizedTarget ||
+        compactKey(k) === compactTarget
+      ));
       if (foundKey) return row[foundKey];
     }
     return undefined;
@@ -225,16 +233,38 @@ export const parseVisitHistoryRow = (row: any): VisitHistoryEntry | null => {
     return Number.isFinite(parsed) ? parsed : undefined;
   };
 
-  const date = String(getVal(['Дата', 'Date']) || '').trim();
-  const routeCode = String(getVal(['Маршрут', 'Route', 'RouteCode']) || '').trim();
-  const clientId = String(getVal(['ИД клиента', 'ClientId', 'ID клиента']) || '').trim();
-  const name = String(getVal(['Название', 'Name']) || '').trim();
-  const address = String(getVal(['Адрес', 'Address']) || '').trim();
+  const date = String(getVal(['Дата', 'Дата визита', 'Дата начала визита', 'VisitDate', 'Date']) || '').trim();
+  const routeCode = String(getVal(['Маршрут', 'Код маршрута', 'Route', 'RouteCode']) || '').trim();
+  const clientId = String(getVal([
+    'ИД клиента',
+    'ID клиента',
+    'Id клиента',
+    'ClientId',
+    'Код клиента',
+    'Клиент код',
+    'Код ТТ',
+    'ID ТТ',
+    'ТочкаДоставкиКод',
+  ]) || '').trim();
+  const name = String(getVal([
+    'Название',
+    'Name',
+    'Название клиента',
+    'Клиент',
+    'Наименование клиента',
+    'Название ТТ',
+    'Наименование ТТ',
+    'Торговая точка',
+  ]) || '').trim();
+  const address = String(getVal(['Адрес', 'Address', 'Адрес клиента', 'Адрес ТТ', 'Фактический адрес']) || '').trim();
   const coordinateDeviationMeters = parseLocalizedNumber(
     getVal([
       'Отклонение координат ТТ и визита м',
       'Отклонение координат ТТ и визита, м',
       'Отклонение координат тт и визита м',
+      'Отклонение координат ТТ и визита',
+      'Отклонение координат',
+      'Отклонение, м',
       'CoordinateDeviationMeters',
     ]),
   );
@@ -243,6 +273,11 @@ export const parseVisitHistoryRow = (row: any): VisitHistoryEntry | null => {
       'Сумма заказа руб',
       'Сумма заказа, руб',
       'Сумма заказа',
+      'Сумма заказа RUB',
+      'Сумма заказа, RUB',
+      'Сумма заказа факт',
+      'Сумма заказа по факту',
+      'Сумма',
       'OrderAmountRub',
     ]),
   );
