@@ -56,7 +56,7 @@ type FactOrderProximityOption = {
   description: string;
 };
 
-type FactOrderContourSides = {
+type ContourSides = {
   top: boolean;
   right: boolean;
   bottom: boolean;
@@ -135,6 +135,13 @@ const getFactOrderProximityKeyByDiff = (diff: number): FactOrderProximityKey | n
   if (diff === 0) return 'fo-same-day';
   if (diff === 1) return 'fo-pm1';
   if (diff === 2) return 'fo-pm2';
+  return null;
+};
+
+const getProximityKeyByDiff = (diff: number): ProximityFilterKey | null => {
+  if (diff === 0) return 'same-day';
+  if (diff === 1) return 'pm1';
+  if (diff === 2) return 'pm2';
   return null;
 };
 
@@ -407,10 +414,8 @@ export function CalendarGrid({ entries, deliveryScheduleEntries, visitHistoryEnt
       salesDates.forEach((salesDay) => {
         operatorDates.forEach((operatorDay) => {
           const diff = Math.abs(differenceInCalendarDays(operatorDay, salesDay));
-
-          if (diff === 0) matches.add('same-day');
-          if (diff === 1) matches.add('pm1');
-          if (diff === 2) matches.add('pm2');
+          const matchKey = getProximityKeyByDiff(diff);
+          if (matchKey) matches.add(matchKey);
         });
       });
 
@@ -459,11 +464,64 @@ export function CalendarGrid({ entries, deliveryScheduleEntries, visitHistoryEnt
   const selectedProximitySet = useMemo(() => new Set(selectedProximityKeys), [selectedProximityKeys]);
   const selectedFactOrderSet = useMemo(() => new Set(selectedFactOrderKeys), [selectedFactOrderKeys]);
 
+  const proximityContourMap = useMemo(() => {
+    const map = new Map<string, ContourSides>();
+    if (selectedProximitySet.size === 0) return map;
+
+    const setContourSide = (clientId: string, day: Date, sides: Partial<ContourSides>) => {
+      const key = `${clientId}::${formatDayKey(day)}`;
+      const current = map.get(key) ?? { top: false, right: false, bottom: false, left: false };
+      map.set(key, {
+        top: current.top || !!sides.top,
+        right: current.right || !!sides.right,
+        bottom: current.bottom || !!sides.bottom,
+        left: current.left || !!sides.left,
+      });
+    };
+
+    pointMetaMap.forEach((point, clientId) => {
+      if (!point.hasSales || !point.hasOperator) return;
+
+      const pointEntries = pointEntriesMap.get(clientId) ?? [];
+      const salesDates = daysInMonth.filter((day) =>
+        pointEntries.some((entry) => entry.Type === 'Торговый' && isScheduled(day, entry)),
+      );
+      const operatorDates = daysInMonth.filter((day) =>
+        pointEntries.some((entry) => entry.Type === 'Оператор' && isScheduled(day, entry)),
+      );
+
+      salesDates.forEach((salesDay) => {
+        operatorDates.forEach((operatorDay) => {
+          const diff = Math.abs(differenceInCalendarDays(operatorDay, salesDay));
+          const matchKey = getProximityKeyByDiff(diff);
+          if (!matchKey || !selectedProximitySet.has(matchKey)) return;
+
+          const startDate = differenceInCalendarDays(operatorDay, salesDay) >= 0 ? salesDay : operatorDay;
+          const endDate = differenceInCalendarDays(operatorDay, salesDay) >= 0 ? operatorDay : salesDay;
+          const contourDays = daysInMonth.filter((day) =>
+            differenceInCalendarDays(day, startDate) >= 0 && differenceInCalendarDays(endDate, day) >= 0,
+          );
+
+          contourDays.forEach((day) => {
+            setContourSide(clientId, day, {
+              top: true,
+              bottom: true,
+              left: isSameDay(day, startDate),
+              right: isSameDay(day, endDate),
+            });
+          });
+        });
+      });
+    });
+
+    return map;
+  }, [daysInMonth, pointEntriesMap, pointMetaMap, selectedProximitySet]);
+
   const factOrderContourMap = useMemo(() => {
-    const map = new Map<string, FactOrderContourSides>();
+    const map = new Map<string, ContourSides>();
     if (selectedFactOrderSet.size === 0) return map;
 
-    const setContourSide = (clientId: string, day: Date, sides: Partial<FactOrderContourSides>) => {
+    const setContourSide = (clientId: string, day: Date, sides: Partial<ContourSides>) => {
       const key = `${clientId}::${formatDayKey(day)}`;
       const current = map.get(key) ?? { top: false, right: false, bottom: false, left: false };
       map.set(key, {
@@ -576,18 +634,21 @@ export function CalendarGrid({ entries, deliveryScheduleEntries, visitHistoryEnt
       .join(', ');
   };
 
+  const getProximityContourSides = (clientId: string, day: Date) =>
+    proximityContourMap.get(`${String(clientId).trim()}::${formatDayKey(day)}`);
+
   const getFactOrderContourSides = (clientId: string, day: Date) =>
     factOrderContourMap.get(`${String(clientId).trim()}::${formatDayKey(day)}`);
 
-  const getFactOrderContourClassName = (sides?: FactOrderContourSides) => {
+  const getContourClassName = (baseClassName: string, sides?: ContourSides) => {
     if (!sides) return '';
 
     return cn(
-      'fact-order-contour',
-      sides.top && 'fact-order-contour-top',
-      sides.right && 'fact-order-contour-right',
-      sides.bottom && 'fact-order-contour-bottom',
-      sides.left && 'fact-order-contour-left',
+      baseClassName,
+      sides.top && `${baseClassName}-top`,
+      sides.right && `${baseClassName}-right`,
+      sides.bottom && `${baseClassName}-bottom`,
+      sides.left && `${baseClassName}-left`,
     );
   };
 
@@ -715,11 +776,13 @@ export function CalendarGrid({ entries, deliveryScheduleEntries, visitHistoryEnt
           const rows = daysInMonth.map((day) => {
             const hasDelivery = isPointDeliveryScheduled(point, day);
             const isWeekend = [0, 6].includes(getDay(day));
-            const contourSides = getFactOrderContourSides(point.ClientId, day);
+            const proximityContourSides = getProximityContourSides(point.ClientId, day);
+            const factOrderContourSides = getFactOrderContourSides(point.ClientId, day);
             const cellClass = [
               hasDelivery ? 'delivery' : '',
               isWeekend ? 'weekend-cell' : '',
-              getFactOrderContourClassName(contourSides),
+              getContourClassName('proximity-contour', proximityContourSides),
+              getContourClassName('fact-order-contour', factOrderContourSides),
             ].filter(Boolean).join(' ');
 
             return `<td class="${cellClass}">${buildShareCellHtml(point.ClientId, day)}</td>`;
@@ -773,6 +836,11 @@ export function CalendarGrid({ entries, deliveryScheduleEntries, visitHistoryEnt
     .weekday { color: #94a3b8; font-size: 8px; text-transform: capitalize; line-height: 1; }
     .daynum { color: #0f172a; font-size: 12px; font-weight: 900; line-height: 1.15; }
     td { width: 36px; min-width: 36px; height: 44px; padding: 2px; vertical-align: middle; background: #ffffff; }
+    td.proximity-contour { position: relative; z-index: 1; }
+    td.proximity-contour-top { border-top: 3px solid #f59e0b; }
+    td.proximity-contour-right { border-right: 3px solid #f59e0b; }
+    td.proximity-contour-bottom { border-bottom: 3px solid #f59e0b; }
+    td.proximity-contour-left { border-left: 3px solid #f59e0b; }
     td.fact-order-contour { position: relative; z-index: 1; }
     td.fact-order-contour-top { border-top: 3px solid #ef4444; }
     td.fact-order-contour-right { border-right: 3px solid #ef4444; }
@@ -1614,7 +1682,8 @@ export function CalendarGrid({ entries, deliveryScheduleEntries, visitHistoryEnt
                   {daysInMonth.map((day) => {
                     const hasDelivery = isPointDeliveryScheduled(point, day);
                     const isWeekend = [0, 6].includes(getDay(day));
-                    const contourSides = getFactOrderContourSides(point.ClientId, day);
+                    const proximityContourSides = getProximityContourSides(point.ClientId, day);
+                    const factOrderContourSides = getFactOrderContourSides(point.ClientId, day);
 
                     return (
                       <td
@@ -1628,14 +1697,25 @@ export function CalendarGrid({ entries, deliveryScheduleEntries, visitHistoryEnt
                               : 'bg-white',
                         )}
                       >
-                        {contourSides && (
+                        {proximityContourSides && (
+                          <div
+                            className={cn(
+                              'pointer-events-none absolute inset-[-1px] z-[3]',
+                              proximityContourSides.top && 'border-t-[3px] border-t-amber-500',
+                              proximityContourSides.right && 'border-r-[3px] border-r-amber-500',
+                              proximityContourSides.bottom && 'border-b-[3px] border-b-amber-500',
+                              proximityContourSides.left && 'border-l-[3px] border-l-amber-500',
+                            )}
+                          />
+                        )}
+                        {factOrderContourSides && (
                           <div
                             className={cn(
                               'pointer-events-none absolute inset-[-1px] z-[4]',
-                              contourSides.top && 'border-t-[3px] border-t-red-600',
-                              contourSides.right && 'border-r-[3px] border-r-red-600',
-                              contourSides.bottom && 'border-b-[3px] border-b-red-600',
-                              contourSides.left && 'border-l-[3px] border-l-red-600',
+                              factOrderContourSides.top && 'border-t-[3px] border-t-red-600',
+                              factOrderContourSides.right && 'border-r-[3px] border-r-red-600',
+                              factOrderContourSides.bottom && 'border-b-[3px] border-b-red-600',
+                              factOrderContourSides.left && 'border-l-[3px] border-l-red-600',
                             )}
                           />
                         )}
